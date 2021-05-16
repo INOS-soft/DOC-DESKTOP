@@ -98,7 +98,6 @@ import { UncommittedChangesStrategy } from '../../models/uncommitted-changes-str
 import { RebaseFlowStep, RebaseStep } from '../../models/rebase-flow-step'
 import { IStashEntry } from '../../models/stash-entry'
 import { WorkflowPreferences } from '../../models/workflow-preferences'
-import { enableForkSettings } from '../../lib/feature-flag'
 import { resolveWithin } from '../../lib/path'
 import {
   CherryPickFlowStep,
@@ -109,6 +108,7 @@ import { CherryPickResult } from '../../lib/git/cherry-pick'
 import { sleep } from '../../lib/promise'
 import { DragElement } from '../../models/drag-element'
 import { findDefaultUpstreamBranch } from '../../lib/branch'
+import { ILastThankYou } from '../../models/last-thank-you'
 
 /**
  * An error handler function.
@@ -681,10 +681,7 @@ export class Dispatcher {
       const addedRepository = addedRepositories[0]
       await this.selectRepository(addedRepository)
 
-      if (
-        enableForkSettings() &&
-        isRepositoryWithForkedGitHubRepository(addedRepository)
-      ) {
+      if (isRepositoryWithForkedGitHubRepository(addedRepository)) {
         this.showPopup({
           type: PopupType.ChooseForkSettings,
           repository: addedRepository,
@@ -693,6 +690,14 @@ export class Dispatcher {
 
       return addedRepository
     })
+  }
+
+  /** Changes the repository alias to a new name. */
+  public changeRepositoryAlias(
+    repository: Repository,
+    newAlias: string | null
+  ): Promise<void> {
+    return this.appStore._changeRepositoryAlias(repository, newAlias)
   }
 
   /** Rename the branch to a new name. */
@@ -1750,6 +1755,15 @@ export class Dispatcher {
           } - payload: ${JSON.stringify(unknownAction)}`
         )
     }
+  }
+
+  /**
+   * Sets the user's preference so that moving the app to /Applications is not asked
+   */
+  public setAskToMoveToApplicationsFolderSetting(
+    value: boolean
+  ): Promise<void> {
+    return this.appStore._setAskToMoveToApplicationsFolderSetting(value)
   }
 
   /**
@@ -2984,7 +2998,9 @@ export class Dispatcher {
     repository: Repository,
     targetBranchName: string
   ): Promise<void> {
-    const { branchesState } = this.repositoryStateManager.get(repository)
+    const { branchesState, cherryPickState } = this.repositoryStateManager.get(
+      repository
+    )
     const { defaultBranch, allBranches, tip } = branchesState
 
     if (tip.kind === TipState.Unknown) {
@@ -3014,7 +3030,26 @@ export class Dispatcher {
       tip,
       targetBranchName,
     }
-    return this.appStore._setCherryPickFlowStep(repository, step)
+
+    await this.appStore._setCherryPickFlowStep(repository, step)
+
+    if (
+      cherryPickState.step == null ||
+      cherryPickState.step.kind !== CherryPickStepKind.CommitsChosen
+    ) {
+      // Started from context menu, cherry pick flow popup already open
+      return
+    }
+
+    const sourceBranch = tip.kind === TipState.Valid ? tip.branch : null
+
+    // If invoked from drag/drop, we need to show the cherry pick flow popup
+    this.showPopup({
+      type: PopupType.CherryPick,
+      repository,
+      commits: cherryPickState.step.commits,
+      sourceBranch,
+    })
   }
 
   /** Set cherry-pick branch created state */
@@ -3031,5 +3066,132 @@ export class Dispatcher {
     branch: Branch
   ): Promise<IAheadBehind | null> {
     return this.appStore._getBranchAheadBehind(repository, branch)
+  }
+
+  /** Set whether thank you is in order for external contributions */
+  public setLastThankYou(lastThankYou: ILastThankYou) {
+    this.appStore._setLastThankYou(lastThankYou)
+  }
+
+  /**
+   * Starts a squash
+   *
+   * @param toSquash - commits to squash onto another commit
+   * @param squashOnto  - commit to squash the `toSquash` commits onto
+   * @param lastRetainedCommitRef - commit ref of commit before commits in squash
+   * @param commitContext - to build the commit message from
+   */
+  public async squash(
+    repository: Repository,
+    toSquash: ReadonlyArray<Commit>,
+    squashOnto: Commit,
+    lastRetainedCommitRef: string,
+    commitContext: ICommitContext
+  ): Promise<void> {
+    // TODO: initialize squash flow for progress dialog
+    // TODO: set undo sha in state (combine with initialize?)
+    // TODO: handle uncommitted changes
+
+    const result = await this.appStore._squash(
+      repository,
+      toSquash,
+      squashOnto,
+      lastRetainedCommitRef,
+      commitContext
+    )
+
+    this.logHowToRevertSquash(repository)
+
+    this.processSquashRebaseResult(repository, result, toSquash)
+  }
+
+  private logHowToRevertSquash(repository: Repository): void {
+    const stateBefore = this.repositoryStateManager.get(repository)
+    const { tip } = stateBefore.branchesState
+    const beforeSha = getTipSha(tip)
+
+    if (tip.kind !== TipState.Valid) {
+      log.info(
+        `[squash] - could not determine branch for ${beforeSha}. No revert instructions provided.`
+      )
+      return
+    }
+
+    log.info(`[squash] starting rebase for ${tip.branch.name} at ${beforeSha}`)
+    log.info(
+      `[squash] to restore the previous state if this completed rebase is unsatisfactory:`
+    )
+    log.info(`[squash] - git checkout ${tip.branch.name}`)
+    log.info(`[squash] - git reset ${beforeSha} --hard`)
+  }
+
+  /**
+   * Processes the squash result
+   *  1. Completes the squash with banner if successful.
+   *  2. Moves squash flow to conflicts handler.
+   *  3. Handles errors.
+   */
+  private async processSquashRebaseResult(
+    repository: Repository,
+    cherryPickResult: RebaseResult,
+    toSquash: ReadonlyArray<CommitOneLine>
+  ): Promise<void> {
+    // This will update the conflict state of the app. This is needed to start
+    // conflict flow if squash results in conflict.
+    const status = await this.appStore._loadStatus(repository)
+    switch (cherryPickResult) {
+      case RebaseResult.CompletedWithoutError:
+        if (status !== null && status.currentTip !== undefined) {
+          // This sets the history to the current tip
+          // TODO: Look at history back to last retained commit and search for
+          // squashed commit based on new commit message ... if there is more
+          // than one, just take the most recent. (not likely?)
+          await this.changeCommitSelection(repository, [status.currentTip])
+        }
+
+        await this.completeSquash(repository, toSquash.length)
+        break
+      case RebaseResult.ConflictsEncountered:
+        this.startConflictSquashFlow(repository)
+        break
+      default:
+        // TODO: clear state
+        this.appStore._closePopup()
+    }
+  }
+
+  /**
+   * Obtains the current app conflict state and switches squash flow to show
+   * conflicts step
+   */
+  private startConflictSquashFlow(repository: Repository): void {
+    const stateAfter = this.repositoryStateManager.get(repository)
+    const { conflictState } = stateAfter.changesState
+    if (conflictState === null || !isRebaseConflictState(conflictState)) {
+      log.error(
+        '[squash] - conflict state was null or not in a rebase conflict state - unable to continue'
+      )
+
+      // TODO: clear state
+      return
+    }
+    // TODO: switch state to show conflict dialog
+    // TODO: record conflict encountered during squash
+  }
+
+  /**
+   * Wrap squash actions
+   * - closes popups
+   * - refreshes repo (so changes appear in history)
+   * TODO: Displays success banner
+   * TODO: state resetting
+   * TODO: record successful squash stats
+   */
+  private async completeSquash(
+    repository: Repository,
+    countSquashed: number
+  ): Promise<void> {
+    this.closePopup()
+    await this.refreshRepository(repository)
   }
 }

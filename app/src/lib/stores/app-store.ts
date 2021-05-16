@@ -209,6 +209,8 @@ import {
   getNumberArray,
   setNumberArray,
   getEnum,
+  getObject,
+  setObject,
 } from '../local-storage'
 import { ExternalEditorError, suggestedExternalEditor } from '../editors/shared'
 import { ApiRepositoriesStore } from './api-repositories-store'
@@ -219,10 +221,7 @@ import {
 } from './updates/changes-state'
 import { ManualConflictResolution } from '../../models/manual-conflict-resolution'
 import { BranchPruner } from './helpers/branch-pruner'
-import {
-  enableHideWhitespaceInDiffOption,
-  enableUpdateRemoteUrl,
-} from '../feature-flag'
+import { enableHideWhitespaceInDiffOption } from '../feature-flag'
 import { Banner, BannerType } from '../../models/banner'
 import moment from 'moment'
 import { ComputedAction } from '../../models/computed-action'
@@ -283,6 +282,8 @@ import {
   isCherryPickHeadFound,
 } from '../git/cherry-pick'
 import { DragElement } from '../../models/drag-element'
+import { ILastThankYou } from '../../models/last-thank-you'
+import { squash } from '../git/squash'
 
 const LastSelectedRepositoryIDKey = 'last-selected-repository-id'
 
@@ -302,9 +303,11 @@ const commitSummaryWidthConfigKey: string = 'commit-summary-width'
 const defaultStashedFilesWidth: number = 250
 const stashedFilesWidthConfigKey: string = 'stashed-files-width'
 
+const askToMoveToApplicationsFolderDefault: boolean = true
 const confirmRepoRemovalDefault: boolean = true
 const confirmDiscardChangesDefault: boolean = true
 const askForConfirmationOnForcePushDefault = true
+const askToMoveToApplicationsFolderKey: string = 'askToMoveToApplicationsFolder'
 const confirmRepoRemovalKey: string = 'confirmRepoRemoval'
 const confirmDiscardChangesKey: string = 'confirmDiscardChanges'
 const confirmForcePushKey: string = 'confirmForcePush'
@@ -341,6 +344,7 @@ const InitialRepositoryIndicatorTimeout = 2 * 60 * 1000
 const MaxInvalidFoldersToDisplay = 3
 
 const hasShownCherryPickIntroKey = 'has-shown-cherry-pick-intro'
+const lastThankYouKey = 'version-and-users-of-last-thank-you'
 
 export class AppStore extends TypedBaseStore<IAppState> {
   private readonly gitStoreCache: GitStoreCache
@@ -400,6 +404,7 @@ export class AppStore extends TypedBaseStore<IAppState> {
   private windowZoomFactor: number = 1
   private isUpdateAvailableBannerVisible: boolean = false
 
+  private askToMoveToApplicationsFolderSetting: boolean = askToMoveToApplicationsFolderDefault
   private askForConfirmationOnRepositoryRemoval: boolean = confirmRepoRemovalDefault
   private confirmDiscardChanges: boolean = confirmDiscardChangesDefault
   private askForConfirmationOnForcePush = askForConfirmationOnForcePushDefault
@@ -449,6 +454,7 @@ export class AppStore extends TypedBaseStore<IAppState> {
   private hasShownCherryPickIntro: boolean = false
 
   private currentDragElement: DragElement | null = null
+  private lastThankYou: ILastThankYou | undefined
 
   public constructor(
     private readonly gitHubUserStore: GitHubUserStore,
@@ -775,6 +781,8 @@ export class AppStore extends TypedBaseStore<IAppState> {
       highlightAccessKeys: this.highlightAccessKeys,
       isUpdateAvailableBannerVisible: this.isUpdateAvailableBannerVisible,
       currentBanner: this.currentBanner,
+      askToMoveToApplicationsFolderSetting: this
+        .askToMoveToApplicationsFolderSetting,
       askForConfirmationOnRepositoryRemoval: this
         .askForConfirmationOnRepositoryRemoval,
       askForConfirmationOnDiscardChanges: this.confirmDiscardChanges,
@@ -799,6 +807,7 @@ export class AppStore extends TypedBaseStore<IAppState> {
       commitSpellcheckEnabled: this.commitSpellcheckEnabled,
       hasShownCherryPickIntro: this.hasShownCherryPickIntro,
       currentDragElement: this.currentDragElement,
+      lastThankYou: this.lastThankYou,
     }
   }
 
@@ -1451,6 +1460,13 @@ export class AppStore extends TypedBaseStore<IAppState> {
     previousRepositoryId: number | null,
     currentRepositoryId: number
   ) {
+    // No need to update the recent repositories if the selected repository is
+    // the same as the old one (this could happen when the alias of the selected
+    // repository is changed).
+    if (previousRepositoryId === currentRepositoryId) {
+      return
+    }
+
     const recentRepositories = getNumberArray(RecentRepositoriesKey).filter(
       el => el !== currentRepositoryId && el !== previousRepositoryId
     )
@@ -1698,6 +1714,11 @@ export class AppStore extends TypedBaseStore<IAppState> {
       defaultStashedFilesWidth
     )
 
+    this.askToMoveToApplicationsFolderSetting = getBoolean(
+      askToMoveToApplicationsFolderKey,
+      askToMoveToApplicationsFolderDefault
+    )
+
     this.askForConfirmationOnRepositoryRemoval = getBoolean(
       confirmRepoRemovalKey,
       confirmRepoRemovalDefault
@@ -1758,6 +1779,7 @@ export class AppStore extends TypedBaseStore<IAppState> {
     })
 
     this.hasShownCherryPickIntro = getBoolean(hasShownCherryPickIntroKey, false)
+    this.lastThankYou = getObject<ILastThankYou>(lastThankYouKey)
 
     this.emitUpdateNow()
 
@@ -3337,7 +3359,7 @@ export class AppStore extends TypedBaseStore<IAppState> {
       return repository
     }
 
-    if (enableUpdateRemoteUrl() && repository.gitHubRepository) {
+    if (repository.gitHubRepository) {
       const gitStore = this.gitStoreCache.get(repository)
       await updateRemoteUrl(gitStore, repository.gitHubRepository, apiRepo)
     }
@@ -3406,6 +3428,14 @@ export class AppStore extends TypedBaseStore<IAppState> {
     this.emitUpdate()
 
     return Promise.resolve()
+  }
+
+  /** This shouldn't be called directly. See `Dispatcher`. */
+  public async _changeRepositoryAlias(
+    repository: Repository,
+    newAlias: string | null
+  ): Promise<void> {
+    return this.repositoriesStore.updateRepositoryAlias(repository, newAlias)
   }
 
   /** This shouldn't be called directly. See `Dispatcher`. */
@@ -4590,6 +4620,17 @@ export class AppStore extends TypedBaseStore<IAppState> {
     await this.statsStore.setOptOut(optOut, userViewedPrompt)
 
     this.emitUpdate()
+  }
+
+  public _setAskToMoveToApplicationsFolderSetting(
+    value: boolean
+  ): Promise<void> {
+    this.askToMoveToApplicationsFolderSetting = value
+
+    setBoolean(askToMoveToApplicationsFolderKey, value)
+    this.emitUpdate()
+
+    return Promise.resolve()
   }
 
   public _setConfirmRepositoryRemovalSetting(
@@ -6190,6 +6231,57 @@ export class AppStore extends TypedBaseStore<IAppState> {
     branch: Branch
   ): Promise<IAheadBehind | null> {
     return getBranchAheadBehind(repository, branch)
+  }
+
+  public _setLastThankYou(lastThankYou: ILastThankYou) {
+    // don't update if same length and same version (assumption
+    // is that update will be either adding a user or updating version)
+    const sameVersion =
+      this.lastThankYou !== undefined &&
+      this.lastThankYou.version === lastThankYou.version
+
+    const sameNumCheckedUsers =
+      this.lastThankYou !== undefined &&
+      this.lastThankYou.checkedUsers.length === lastThankYou.checkedUsers.length
+
+    if (sameVersion && sameNumCheckedUsers) {
+      return
+    }
+
+    setObject(lastThankYouKey, lastThankYou)
+    this.lastThankYou = lastThankYou
+
+    this.emitUpdate()
+  }
+
+  /** This shouldn't be called directly. See `Dispatcher`. */
+  public async _squash(
+    repository: Repository,
+    toSquash: ReadonlyArray<CommitOneLine>,
+    squashOnto: CommitOneLine,
+    lastRetainedCommitRef: string,
+    commitContext: ICommitContext
+  ): Promise<RebaseResult> {
+    if (toSquash.length === 0) {
+      log.error('[_squash] - Unable to squash. No commits provided.')
+      return RebaseResult.Error
+    }
+
+    // TODO: Add progress callback
+
+    const commitMessage = await formatCommitMessage(repository, commitContext)
+    const gitStore = this.gitStoreCache.get(repository)
+    const result = await gitStore.performFailableOperation(() =>
+      squash(
+        repository,
+        toSquash,
+        squashOnto,
+        lastRetainedCommitRef,
+        commitMessage
+      )
+    )
+
+    return result || RebaseResult.Error
   }
 }
 

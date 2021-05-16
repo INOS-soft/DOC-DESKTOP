@@ -102,19 +102,21 @@ import {
   initializeRebaseFlowForConflictedRepository,
   isCurrentBranchForcePush,
 } from '../lib/rebase'
-import { BannerType } from '../models/banner'
+import { Banner, BannerType } from '../models/banner'
 import { StashAndSwitchBranch } from './stash-changes/stash-and-switch-branch-dialog'
 import { OverwriteStash } from './stash-changes/overwrite-stashed-changes-dialog'
 import { ConfirmDiscardStashDialog } from './stashing/confirm-discard-stash'
 import { CreateTutorialRepositoryDialog } from './no-repositories/create-tutorial-repository-dialog'
-import { enableForkyCreateBranchUI } from '../lib/feature-flag'
 import { ConfirmExitTutorial } from './tutorial'
 import { TutorialStep, isValidTutorialStep } from '../models/tutorial-step'
 import { WorkflowPushRejectedDialog } from './workflow-push-rejected/workflow-push-rejected'
 import { SAMLReauthRequiredDialog } from './saml-reauth-required/saml-reauth-required'
 import { CreateForkDialog } from './forks/create-fork-dialog'
 import { findDefaultUpstreamBranch } from '../lib/branch'
-import { GitHubRepository } from '../models/github-repository'
+import {
+  GitHubRepository,
+  hasWritePermission,
+} from '../models/github-repository'
 import { CreateTag } from './create-tag'
 import { DeleteTag } from './delete-tag'
 import { ChooseForkSettings } from './choose-fork-settings'
@@ -135,6 +137,16 @@ import { CherryPickCommit } from './drag-elements/cherry-pick-commit'
 import classNames from 'classnames'
 import { dragAndDropManager } from '../lib/drag-and-drop-manager'
 import { MoveToApplicationsFolder } from './move-to-applications-folder'
+import { ChangeRepositoryAlias } from './change-repository-alias/change-repository-alias-dialog'
+import { ThankYou } from './thank-you'
+import {
+  getUserContributions,
+  hasUserAlreadyBeenCheckedOrThanked,
+  updateLastThankYou,
+} from '../lib/thank-you'
+import { ReleaseNote } from '../models/release-notes'
+import { CommitMessageDialog } from './commit-message/commit-message-dialog'
+import { buildAutocompletionProviders } from './autocompletion'
 
 const MinuteInMilliseconds = 1000 * 60
 const HourInMilliseconds = MinuteInMilliseconds * 60
@@ -311,9 +323,15 @@ export class App extends React.Component<IAppProps, IAppState> {
     log.info(`execPath: '${process.execPath}'`)
 
     // Only show the popup in beta/production releases and mac machines
-    if (__DEV__ === false && remote.app.isInApplicationsFolder?.() === false) {
+    if (
+      __DEV__ === false &&
+      this.state.askToMoveToApplicationsFolderSetting &&
+      remote.app.isInApplicationsFolder?.() === false
+    ) {
       this.showPopup({ type: PopupType.MoveToApplicationsFolder })
     }
+
+    this.checkIfThankYouIsInOrder()
   }
 
   private onMenuEvent(name: MenuEvent): any {
@@ -457,6 +475,12 @@ export class App extends React.Component<IAppProps, IAppState> {
             {
               kind: 'other',
               message: 'In other news...',
+            },
+          ],
+          thankYous: [
+            {
+              kind: 'other',
+              message: 'In other news... . Thanks @some-body-to-thank!',
             },
           ],
         },
@@ -1500,10 +1524,7 @@ export class App extends React.Component<IAppProps, IAppState> {
         let upstreamGhRepo: GitHubRepository | null = null
         let upstreamDefaultBranch: Branch | null = null
 
-        if (
-          enableForkyCreateBranchUI() &&
-          isRepositoryWithGitHubRepository(repository)
-        ) {
+        if (isRepositoryWithGitHubRepository(repository)) {
           upstreamGhRepo = getNonForkGitHubRepository(repository)
           upstreamDefaultBranch = findDefaultUpstreamBranch(
             repository,
@@ -1519,6 +1540,7 @@ export class App extends React.Component<IAppProps, IAppState> {
             upstreamDefaultBranch={upstreamDefaultBranch}
             allBranches={branchesState.allBranches}
             repository={repository}
+            targetCommit={popup.targetCommit}
             upstreamGitHubRepository={upstreamGhRepo}
             onDismissed={onPopupDismissedFn}
             dispatcher={this.props.dispatcher}
@@ -1544,6 +1566,7 @@ export class App extends React.Component<IAppProps, IAppState> {
             onDismissed={onPopupDismissedFn}
             applicationName={getName()}
             applicationVersion={version}
+            applicationArchitecture={process.arch}
             onCheckForUpdates={this.onCheckForUpdates}
             onShowAcknowledgements={this.showAcknowledgements}
             onShowTermsAndConditions={this.showTermsAndConditions}
@@ -2048,6 +2071,71 @@ export class App extends React.Component<IAppProps, IAppState> {
           />
         )
       }
+      case PopupType.ChangeRepositoryAlias: {
+        return (
+          <ChangeRepositoryAlias
+            dispatcher={this.props.dispatcher}
+            repository={popup.repository}
+            onDismissed={onPopupDismissedFn}
+          />
+        )
+      }
+      case PopupType.ThankYou:
+        return (
+          <ThankYou
+            key="thank-you"
+            emoji={this.state.emoji}
+            userContributions={popup.userContributions}
+            friendlyName={popup.friendlyName}
+            latestVersion={popup.latestVersion}
+            onDismissed={onPopupDismissedFn}
+          />
+        )
+      case PopupType.CommitMessage:
+        const repositoryState = this.props.repositoryStateManager.get(
+          popup.repository
+        )
+
+        const { tip } = repositoryState.branchesState
+        const currentBranchName: string | null =
+          tip.kind === TipState.Valid ? tip.branch.name : null
+
+        const hasWritePermissionForRepository =
+          popup.repository.gitHubRepository === null ||
+          hasWritePermission(popup.repository.gitHubRepository)
+
+        const autocompletionProviders = buildAutocompletionProviders(
+          popup.repository,
+          this.props.dispatcher,
+          this.state.emoji,
+          this.props.issuesStore,
+          this.props.gitHubUserStore,
+          this.state.accounts
+        )
+
+        return (
+          <CommitMessageDialog
+            key="commit-message"
+            autocompletionProviders={autocompletionProviders}
+            branch={currentBranchName}
+            coAuthors={popup.coAuthors}
+            commitAuthor={repositoryState.commitAuthor}
+            commitMessage={popup.commitMessage}
+            commitSpellcheckEnabled={this.state.commitSpellcheckEnabled}
+            dialogButtonText={popup.dialogButtonText}
+            dialogTitle={popup.dialogTitle}
+            dispatcher={this.props.dispatcher}
+            prepopulateCommitSummary={popup.prepopulateCommitSummary}
+            repository={popup.repository}
+            showBranchProtected={
+              repositoryState.changesState.currentBranchProtected
+            }
+            showCoAuthoredBy={popup.showCoAuthoredBy}
+            showNoWriteAccess={!hasWritePermissionForRepository}
+            onDismissed={onPopupDismissedFn}
+            onSubmitCommitMessage={popup.onSubmitCommitMessage}
+          />
+        )
       default:
         return assertNever(popup, `Unknown popup type: ${popup}`)
     }
@@ -2367,8 +2455,9 @@ export class App extends React.Component<IAppProps, IAppState> {
     let icon: OcticonSymbol
     let title: string
     if (repository) {
+      const alias = repository instanceof Repository ? repository.alias : null
       icon = iconForRepository(repository)
-      title = repository.name
+      title = alias ?? repository.name
     } else if (this.state.repositories.length > 0) {
       icon = OcticonSymbol.repo
       title = __DARWIN__ ? 'Select a Repository' : 'Select a repository'
@@ -2925,6 +3014,89 @@ export class App extends React.Component<IAppProps, IAppState> {
    */
   private onDragLeaveBranch = (): void => {
     dragAndDropManager.emitLeaveDropTarget()
+  }
+
+  /**
+   * Check if the user signed into their dotCom account has been tagged in
+   * our release notes or if they already have received a thank you card.
+   *
+   * Notes: A user signed into a GHE account should not be contributing to
+   * Desktop as that account should be used for GHE repos. Tho, technically it
+   * is possible through commit misattribution and we are intentionally ignoring
+   * this scenario as it would be expected any misattributed commit would not
+   * be able to be detected.
+   */
+  private async checkIfThankYouIsInOrder(): Promise<void> {
+    const dotComAccount = this.getDotComAccount()
+    if (dotComAccount === null) {
+      // The user is not signed in or is a GHE user who should not have any.
+      return
+    }
+
+    const { lastThankYou } = this.state
+    const { login } = dotComAccount
+    if (hasUserAlreadyBeenCheckedOrThanked(lastThankYou, login, getVersion())) {
+      return
+    }
+
+    const isOnlyLastRelease =
+      lastThankYou !== undefined && lastThankYou.checkedUsers.includes(login)
+    const userContributions = await getUserContributions(
+      isOnlyLastRelease,
+      login
+    )
+    if (userContributions === null) {
+      // This will prevent unnecessary release note retrieval on every time the
+      // app is opened for a non-contributor.
+      updateLastThankYou(
+        this.props.dispatcher,
+        lastThankYou,
+        login,
+        getVersion()
+      )
+      return
+    }
+
+    // If this is the first time user has seen the card, we want to thank them
+    // for all previous versions. Thus, only specify current version if they
+    // have been thanked before.
+    const displayVersion = isOnlyLastRelease ? getVersion() : null
+    const banner: Banner = {
+      type: BannerType.OpenThankYouCard,
+      // Grab emoji's by reference because we could still be loading emoji's
+      emoji: this.state.emoji,
+      onOpenCard: () =>
+        this.openThankYouCard(userContributions, displayVersion),
+      onThrowCardAway: () => {
+        updateLastThankYou(
+          this.props.dispatcher,
+          lastThankYou,
+          login,
+          getVersion()
+        )
+      },
+    }
+    this.props.dispatcher.setBanner(banner)
+  }
+
+  private openThankYouCard = (
+    userContributions: ReadonlyArray<ReleaseNote>,
+    latestVersion: string | null = null
+  ) => {
+    const dotComAccount = this.getDotComAccount()
+
+    if (dotComAccount === null) {
+      // The user is not signed in or is a GHE user who should not have any.
+      return
+    }
+    const { friendlyName } = dotComAccount
+
+    this.props.dispatcher.showPopup({
+      type: PopupType.ThankYou,
+      userContributions,
+      friendlyName,
+      latestVersion,
+    })
   }
 }
 

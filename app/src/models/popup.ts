@@ -5,7 +5,7 @@ import {
 } from './repository'
 import { PullRequest } from './pull-request'
 import { Branch } from './branch'
-import { ReleaseSummary } from './release-notes'
+import { ReleaseNote, ReleaseSummary } from './release-notes'
 import { IRemote } from './remote'
 import { RetryAction } from './retry-actions'
 import { WorkingDirectoryFileChange } from './status'
@@ -16,6 +16,8 @@ import { Account } from '../models/account'
 import { Progress } from './progress'
 import { ITextDiff, DiffSelection } from './diff'
 import { RepositorySettingsTab } from '../ui/repository-settings/repository-settings'
+import { ICommitMessage } from './commit-message'
+import { IAuthor } from './author'
 
 export enum PopupType {
   RenameBranch = 1,
@@ -69,6 +71,9 @@ export enum PopupType {
   ConfirmDiscardSelection,
   CherryPick,
   MoveToApplicationsFolder,
+  ChangeRepositoryAlias,
+  ThankYou,
+  CommitMessage,
 }
 
 export type Popup =
@@ -119,6 +124,7 @@ export type Popup =
       type: PopupType.CreateBranch
       repository: Repository
       initialName?: string
+      targetCommit?: CommitOneLine
     }
   | { type: PopupType.SignIn }
   | { type: PopupType.About }
@@ -276,3 +282,21 @@ export type Popup =
       sourceBranch: Branch | null
     }
   | { type: PopupType.MoveToApplicationsFolder }
+  | { type: PopupType.ChangeRepositoryAlias; repository: Repository }
+  | {
+      type: PopupType.ThankYou
+      userContributions: ReadonlyArray<ReleaseNote>
+      friendlyName: string
+      latestVersion: string | null
+    }
+  | {
+      type: PopupType.CommitMessage
+      coAuthors: ReadonlyArray<IAuthor>
+      showCoAuthoredBy: boolean
+      commitMessage: ICommitMessage | null
+      dialogTitle: string
+      dialogButtonText: string
+      prepopulateCommitSummary: boolean
+      repository: Repository
+      onSubmitCommitMessage: (context: ICommitContext) => Promise<boolean>
+    }

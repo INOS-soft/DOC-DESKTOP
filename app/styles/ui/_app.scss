@@ -45,6 +45,12 @@
             cursor: default;
           }
 
+          .branches-list-item {
+            div {
+              pointer-events: none;
+            }
+          }
+
           .list-item:not(.selected) {
             .branches-list-item:hover,
             .pull-request-item:hover {
@@ -55,6 +61,15 @@
               background-color: var(--box-selected-active-background-color);
               cursor: copy;
             }
+          }
+
+          .branches-list-item.new-branch-drop:hover {
+            --text-color: var(--box-selected-active-text-color);
+            --text-secondary-color: var(--box-selected-active-text-color);
+
+            color: var(--text-color);
+            background-color: var(--box-selected-active-background-color);
+            cursor: copy;
           }
         }
       }

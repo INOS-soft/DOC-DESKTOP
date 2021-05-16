@@ -40,6 +40,7 @@ import { TutorialStep } from '../models/tutorial-step'
 import { UncommittedChangesStrategy } from '../models/uncommitted-changes-strategy'
 import { CherryPickFlowStep } from '../models/cherry-pick'
 import { DragElement } from '../models/drag-element'
+import { ILastThankYou } from '../models/last-thank-you'
 
 export enum SelectionType {
   Repository,
@@ -172,6 +173,9 @@ export interface IAppState {
   /** Whether we should show the update banner */
   readonly isUpdateAvailableBannerVisible: boolean
 
+  /** Whether we should ask the user to move the app to /Applications */
+  readonly askToMoveToApplicationsFolderSetting: boolean
+
   /** Whether we should show a confirmation dialog */
   readonly askForConfirmationOnRepositoryRemoval: boolean
 
@@ -266,6 +270,12 @@ export interface IAppState {
    * Whether or not the user has been introduced to the cherry pick feature
    */
   readonly hasShownCherryPickIntro: boolean
+
+  /**
+   * Record of what logged in users have been checked to see if thank you is in
+   * order for external contributions in latest release.
+   */
+  readonly lastThankYou: ILastThankYou | undefined
 }
 
 export enum FoldoutType {

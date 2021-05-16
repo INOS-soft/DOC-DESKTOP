@@ -43,10 +43,7 @@ import { clamp } from '../../lib/clamp'
 import { uuid } from '../../lib/uuid'
 import { showContextualMenu } from '../main-process-proxy'
 import { IMenuItem } from '../../lib/menu-item'
-import {
-  enableDiscardLines,
-  enableTextDiffExpansion,
-} from '../../lib/feature-flag'
+import { enableTextDiffExpansion } from '../../lib/feature-flag'
 import { canSelect } from './diff-helpers'
 import {
   expandTextDiffHunk,
@@ -55,6 +52,7 @@ import {
   expandWholeTextDiff,
 } from './text-diff-expansion'
 import { createOcticonElement } from '../octicons/octicon'
+import { HideWhitespaceWarning } from './hide-whitespace-warning'
 
 /** The longest line for which we'd try to calculate a line diff. */
 const MaxIntraLineDiffStringLength = 4096
@@ -706,10 +704,6 @@ export class TextDiff extends React.Component<ITextDiffProps, ITextDiffState> {
     editor: CodeMirror.Editor,
     event: Event
   ): ReadonlyArray<IMenuItem> | null {
-    if (!enableDiscardLines()) {
-      return null
-    }
-
     const file = this.props.file
 
     if (this.props.readOnly || !canSelect(file)) {
@@ -1253,8 +1247,7 @@ export class TextDiff extends React.Component<ITextDiffProps, ITextDiffState> {
     }
 
     if (this.props.hideWhitespaceInDiff) {
-      marker.title =
-        'Partial committing is not available while hiding whitespace changes'
+      marker.title = HideWhitespaceWarning
     }
 
     const hunkExpandWholeHandle = marker.getElementsByClassName(
